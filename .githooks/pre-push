@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pushed_ver=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/tags/v*) pushed_ver="${local_ref#refs/tags/v}" ;;
+    refs/tags/[0-9]*) pushed_ver="${local_ref#refs/tags/}" ;;
+  esac
+done
+
+[[ -z "$pushed_ver" ]] && exit 0
+
+echo "> [pre-push] checking version tag: ${pushed_ver}"
+npm run build
+pkg_version="$(node -p "require('./package.json').version")"
+if [[ "$pushed_ver" != "$pkg_version" ]]; then
+  echo "!! [pre-push] tag ${pushed_ver} does not match package.json version ${pkg_version}" >&2
+  exit 1
+fi
+
+echo "> [pre-push] OK: ${pushed_ver} == package.json v${pkg_version}"

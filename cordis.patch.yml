@@ -1,0 +1,3 @@
+- insert:
+    - id: opencode-zen-free-provider
+      name: '@jiesou/dsh-opencode-zen-free-provider'
