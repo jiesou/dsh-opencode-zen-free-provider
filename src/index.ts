@@ -207,7 +207,12 @@ function buildModels(
       const metadata = modelsById[id]
       if (!isRecord(metadata)) return []
       const baseCompat = baseModels.find(base => base.id === id)?.compat
-      const compat = baseCompat === undefined ? undefined : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false }
+      // Models not yet in the pi-ai built-in catalogue still need the Zen-
+      // specific maxTokensField ("max_tokens") so the proxy does not reject
+      // the request with a 500 when "max_completion_tokens" arrives.
+      const compat = baseCompat === undefined
+        ? { maxTokensField: 'max_tokens' as const }
+        : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false }
 
       // No ladder upstream ⇒ no selector: `reasoning: false` means "no effort
       // control", never "no thinking".

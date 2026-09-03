@@ -1,6 +1,6 @@
 {
   "name": "@jiesou/dsh-opencode-zen-free-provider",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "OpenCode Zen free models provider for dsh",
   "type": "module",
   "main": "lib/index.js",
