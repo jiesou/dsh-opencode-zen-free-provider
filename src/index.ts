@@ -211,7 +211,7 @@ function buildModels(
       // specific maxTokensField ("max_tokens") so the proxy does not reject
       // the request with a 500 when "max_completion_tokens" arrives.
       const compat = baseCompat === undefined
-        ? { maxTokensField: 'max_tokens' as const }
+        ? { maxTokensField: 'max_tokens' as const, supportsReasoningEffort: false as const }
         : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false }
 
       // No ladder upstream ⇒ no selector: `reasoning: false` means "no effort
