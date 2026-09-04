@@ -3,7 +3,8 @@ import { assertUsableApiKey, errorChain, resolveRetryPolicy, RetryPolicySchema }
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter, type ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
+import type {} from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { createHash } from 'node:crypto'
 import { createProvider, type AuthContext, type Context as PiContext, type CredentialStore, type Model, type SimpleStreamOptions, type ThinkingLevelMap, type ProviderStreams } from '@earendil-works/pi-ai'
@@ -14,15 +15,18 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 // identity, so its stream functions are cast back to the package's types here.
 // Runtime behavior is identical; only the (private) class identity differs.
 import { stream as _piAgentStream, streamSimple as _piAgentStreamSimple, installZenUserAgent } from './openai-completions.js'
+import { stream as _piResponsesStream, streamSimple as _piResponsesStreamSimple, installZenUserAgent as installZenUserAgentResponses } from './openai-responses.js'
 const piAgentStream = _piAgentStream as unknown as ProviderStreams['stream']
 const piAgentStreamSimple = _piAgentStreamSimple as unknown as ProviderStreams['streamSimple']
+const piResponsesStream = _piResponsesStream as unknown as ProviderStreams['stream']
+const piResponsesStreamSimple = _piResponsesStreamSimple as unknown as ProviderStreams['streamSimple']
 
 export const name = 'opencode-zen-free-provider'
-export const inject = ['llm', 'settings']
+export const inject = ['llm']
 
 const PROVIDER = name
 const DISPLAY_NAME = 'OpenCode Zen Free'
-const NS = settingsNamespace('opencode-zen-free-provider')
+const NS = 'opencode-zen-free-provider'
 const OPENCODE_VERSION_URL = 'https://data.jsdelivr.com/v1/packages/npm/opencode-ai/resolved'
 const OPENCODE_VERSION_FALLBACK = '1.18.18'
 
@@ -73,7 +77,7 @@ const lastUserContent = (context: PiContext): string => {
   return ''
 }
 
-const zenApiHeaders = (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) => {
+const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, context: PiContext, options: SimpleStreamOptions) => {
   const sessionId = options.sessionId ?? 'dsh-session-unknown'
   const requestSeed = `${sessionId}\0${lastUserContent(context)}`
   return {
@@ -148,11 +152,25 @@ const sanitizeStream = <S extends { push(event: unknown): void }>(stream: S): S 
   return stream
 }
 
-const zenApi = {
-  stream: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
-    sanitizeStream(piAgentStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
-  streamSimple: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
-    sanitizeStream(piAgentStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
+type ZenApi = 'openai-completions' | 'openai-responses'
+
+const zenStreamFor = (api: ZenApi): ProviderStreams => api === 'openai-responses'
+  ? {
+    stream: (model: Model<'openai-responses'>, context: PiContext, options: SimpleStreamOptions) =>
+      sanitizeStream(piResponsesStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
+    streamSimple: (model: Model<'openai-responses'>, context: PiContext, options: SimpleStreamOptions) =>
+      sanitizeStream(piResponsesStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
+  } as unknown as ProviderStreams
+  : {
+    stream: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
+      sanitizeStream(piAgentStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
+    streamSimple: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
+      sanitizeStream(piAgentStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), options)),
+  }
+
+const zenApi: Partial<Record<ZenApi, ProviderStreams>> = {
+  'openai-completions': zenStreamFor('openai-completions'),
+  'openai-responses': zenStreamFor('openai-responses'),
 }
 
 async function fetchJson(url: string, headers: Record<string, string>) {
@@ -181,14 +199,22 @@ function reasoningLevelsFor(metadata: Record<string, unknown>): string[] {
 // level the endpoint accepts lands at its own key with its own wire value; the
 // `off` key carries the upstream's literal close value when the feed names one
 // (e.g. `none`), so the selector's "Off" entry is a real switch rather than a
-// no-op.
-function reasoningMapFor(levels: readonly string[]): ThinkingLevelMap {
+// `no-op. Responses-model feeds name no close value and `/responses` rejects
+// both fabricated ones (`'off'` is an unknown variant, `'none'` unsupported
+// for this model). pi-ai sends nothing only when the key is explicitly `null`
+// (an absent key falls back to sending `'none'`), so `off: null` is the honest
+// "upstream decides" — it also drops "Off" from the selector, which is correct
+// because this endpoint offers no way to turn thinking down.
+function reasoningMapFor(levels: readonly string[], api: ZenApi): ThinkingLevelMap {
   const map: ThinkingLevelMap = {}
   for (const key of PI_LEVEL_KEYS) {
     if (levels.includes(key)) map[key] = key
   }
-  const closeValue = levels.includes('none') ? 'none' : 'off'
-  map.off = closeValue
+  if (api === 'openai-completions') {
+    map.off = levels.includes('none') ? 'none' : 'off'
+  } else {
+    map.off = null
+  }
   return map
 }
 
@@ -197,15 +223,18 @@ function buildModels(
   zenData: readonly unknown[],
   modelsById: Record<string, unknown>,
   userAgent: string,
-): Model<'openai-completions'>[] {
+): Model<ZenApi>[] {
   const baseModels = getBuiltinModels('opencode')
   return zenData
     .filter((entry): entry is Record<string, unknown> =>
       isRecord(entry) && typeof entry.id === 'string' && entry.id.endsWith('-free'))
-    .flatMap((entry): Model<'openai-completions'>[] => {
+    .flatMap((entry): Model<ZenApi>[] => {
       const id = entry.id as string
       const metadata = modelsById[id]
       if (!isRecord(metadata)) return []
+      // Zen serves muse-spark contributor-free models on the Responses
+      // endpoint (`/zen/v1/responses`); chat/completions 500s for them.
+      const api: ZenApi = id.includes('muse-spark') ? 'openai-responses' : 'openai-completions'
       const baseCompat = baseModels.find(base => base.id === id)?.compat
       // Models not yet in the pi-ai built-in catalogue still need the Zen-
       // specific maxTokensField ("max_tokens") so the proxy does not reject
@@ -226,12 +255,12 @@ function buildModels(
       return [{
         id,
         name: typeof metadata.name === 'string' ? metadata.name : id,
-        api: 'openai-completions',
+        api,
         provider: PROVIDER,
         baseUrl: 'https://opencode.ai/zen/v1',
         headers: { 'User-Agent': userAgent, 'HTTP-Referer': 'https://opencode.ai' },
         reasoning: controllable,
-        ...(controllable ? { thinkingLevelMap: reasoningMapFor(levels) } : {}),
+        ...(controllable ? { thinkingLevelMap: reasoningMapFor(levels, api) } : {}),
         input: input.length > 0 ? input : ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: id === 'mimo-v2.5-free' ? 1_048_576
@@ -243,19 +272,20 @@ function buildModels(
 }
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  // One-time: the Zen user-agent the cloned transport forces on every request.
+  // One-time: the Zen user-agent the cloned transports force on every request.
   const opencodeVersion = await resolveOpenCodeVersion()
   const opencodeUserAgent = `opencode/${opencodeVersion}`
   installZenUserAgent(opencodeUserAgent)
+  installZenUserAgentResponses(opencodeUserAgent)
 
   let current: () => Config = () => config
   // Outside the settings-backed config, so a settings snapshot cannot clobber a
   // scan.
-  let scanned: Model<'openai-completions'>[] = []
+  let scanned: Model<ZenApi>[] = []
 
   const buildProfiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
     const opts = current()
-    const piProvider = createProvider<'openai-completions'>({
+    const piProvider = createProvider<ZenApi>({
       id: PROVIDER,
       name: 'OpenCodeZenFree',
       baseUrl: 'https://opencode.ai/zen/v1',
@@ -305,13 +335,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ])
   ctx.llm.registerAdapter([PROVIDER], adapter)
 
-  installSettingsSection(ctx, NS, Config, config, {
-    setSource: (source) => {
-      current = source
-    },
-    onChange: () => {
-      profiles = buildProfiles()
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, NS, Config, config, {
+      setSource: (source) => {
+        current = source
+      },
+      onChange: () => {
+        profiles = buildProfiles()
+      },
+    })
   })
 
   // The catalog is fetched once at mount. Mount never awaits it: an unreachable
