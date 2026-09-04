@@ -232,6 +232,7 @@ function buildModels(
       const id = entry.id as string
       const metadata = modelsById[id]
       if (!isRecord(metadata)) return []
+      if (typeof metadata.status === 'string' && metadata.status === 'deprecated') return []
       // Zen serves muse-spark contributor-free models on the Responses
       // endpoint (`/zen/v1/responses`); chat/completions 500s for them.
       const api: ZenApi = id.includes('muse-spark') ? 'openai-responses' : 'openai-completions'
