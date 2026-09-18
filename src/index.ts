@@ -7,7 +7,7 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { createHash } from 'node:crypto'
-import { createProvider, type AuthContext, type Context as PiContext, type CredentialStore, type Model, type SimpleStreamOptions, type ThinkingLevelMap, type ProviderStreams } from '@earendil-works/pi-ai'
+import { createProvider, type AuthContext, type Context as PiContext, type CredentialStore, type Model, type SimpleStreamOptions, type ThinkingLevelMap, type ProviderStreams, type Tool } from '@earendil-works/pi-ai'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 // Cloned (and minimized) from @earendil-works/pi-ai's openai-completions module.
 // See src/openai-completions.ts for the source URL + the only change (zenFetch).
@@ -91,11 +91,44 @@ const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, context: PiContext
   }
 }
 
+/**
+ * Model-visible description of a tool this harness cannot execute. Both
+ * placeholders take no arguments, so a model that calls one wastes a round trip
+ * at worst — it can never be mistaken for an action that would otherwise run.
+ */
+const ZEN_TOOL_TEXT = 'Requirement placeholder from OpenCode Zen: this harness cannot execute it.'
+
+const zenTool = (name: string): Tool => ({
+  name,
+  description: ZEN_TOOL_TEXT,
+  parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+})
+
+/**
+ * Zen's free tier is gated on the request fingerprint, and one of the checks is
+ * the tool list: it must offer at least two distinct tools, `bash` among them,
+ * alongside `stream: true` (both transports hardcode that). Requests that carry
+ * fewer tools — compaction, session titles, summaries, or any turn whose
+ * permissions cut the list down — are refused with FreeTierError and the
+ * misleading "free tier can only be used from within OpenCode". Pad such
+ * requests so the shape requirement holds. Declared tools stay first and only
+ * missing ones are appended, so a request that already qualifies is untouched
+ * and the provider's prompt cache is not invalidated.
+ */
+export const requiredZenTools = (tools: readonly Tool[] = []): Tool[] => {
+  const present = new Set(tools.map(tool => tool.name))
+  const filled = [...tools]
+  if (!present.has('bash')) filled.push(zenTool('bash'))
+  if (new Set(filled.map(tool => tool.name)).size < 2) filled.push(zenTool('zen-tool'))
+  return filled
+}
+
 // Replayed thinking blocks carry no wire signature; marking them
 // `reasoning_content` keeps the transport from mangling history. Never gated on
 // `model.reasoning`: a model with no effort control still streams thinking.
 const normalizeReasoningContext = (context: PiContext): PiContext => ({
   ...context,
+  tools: requiredZenTools(context.tools),
   messages: context.messages.map(message => message.role !== 'assistant' ? message : {
     ...message,
     content: message.content.map(block =>
