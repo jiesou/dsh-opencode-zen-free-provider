@@ -8,7 +8,17 @@ export interface Config {
     /** Provider-owned model-request retry policy; omission uses normal defaults. */
     retryPolicy?: RetryPolicyConfig;
 }
-export declare const Config: z<Config>;
+export declare const Config: z<Schemastery.ObjectS<NoInfer<{
+    retryPolicy: z<NoInfer<RetryPolicyConfig>, NoInfer<RetryPolicyConfig>, "volatile">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    retryPolicy: z<NoInfer<RetryPolicyConfig>, NoInfer<RetryPolicyConfig>, "volatile">;
+}>>, "plain">;
+/**
+ * {@link Config} as the Loader holds it: every field is volatile, so a settings write
+ * reaches the running plugin as a committed reference instead of remounting it, and
+ * the field is one the settings service shows a form for.
+ */
+type LiveConfig = Schemastery.TypeT<typeof Config>;
 /**
  * Zen's free tier is gated on the request fingerprint, and one of the checks is
  * the tool list: it must offer at least two distinct tools, `bash` among them,
@@ -21,4 +31,5 @@ export declare const Config: z<Config>;
  * and the provider's prompt cache is not invalidated.
  */
 export declare const requiredZenTools: (tools?: readonly Tool[]) => Tool[];
-export declare function apply(ctx: Context, config: Config): Promise<void>;
+export declare function apply(ctx: Context, config: LiveConfig): Promise<void>;
+export {};
