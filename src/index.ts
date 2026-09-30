@@ -8,7 +8,7 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import z from '@deepseek-ai/schemastery'
 import { createHash } from 'node:crypto'
-import { createProvider, type AuthContext, type Context as PiContext, type CredentialStore, type Model, type SimpleStreamOptions, type ThinkingLevelMap, type ProviderStreams, type Tool } from '@earendil-works/pi-ai'
+import { createProvider, type AuthContext, type CredentialStore, type Model, type SimpleStreamOptions, type SystemMessage, type ThinkingLevelMap, type ProviderStreams, type Tool, type TranscriptContext } from '@earendil-works/pi-ai'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { stream as piAgentStream, streamSimple as piAgentStreamSimple } from '@earendil-works/pi-ai/api/openai-completions'
 import { stream as piResponsesStream, streamSimple as piResponsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses'
@@ -76,7 +76,7 @@ const opencodeId = (prefix: 'ses' | 'msg', value: string): string => {
   return `${prefix}_${digest.toString('hex').slice(0, 12)}${encoded.slice(0, 14)}`
 }
 
-const lastUserContent = (context: PiContext): string => {
+const lastUserContent = (context: TranscriptContext): string => {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const message = context.messages[index]
     if (message.role !== 'user') continue
@@ -86,7 +86,7 @@ const lastUserContent = (context: PiContext): string => {
   return ''
 }
 
-const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, context: PiContext, options: SimpleStreamOptions) => {
+const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, context: TranscriptContext, options: SimpleStreamOptions) => {
   const sessionId = options.sessionId ?? 'dsh-session-unknown'
   const requestSeed = `${sessionId}\0${lastUserContent(context)}`
   return {
@@ -152,15 +152,26 @@ export const requiredZenTools = (tools: readonly Tool[] = []): Tool[] => {
 // Replayed thinking blocks carry no wire signature; marking them
 // `reasoning_content` keeps the transport from mangling history. Never gated on
 // `model.reasoning`: a model with no effort control still streams thinking.
-const normalizeReasoningContext = (context: PiContext): PiContext => ({
+//
+// On pi-ai 0.87 the tool declarations no longer sit on the context: they live in
+// the transcript's system messages, so padding the list means rewriting the
+// leading `toolsAdded` (falling back to `context.tools`, which a context built
+// before normalization still carries).
+const normalizeReasoningContext = (context: TranscriptContext & { tools?: readonly Tool[] }): TranscriptContext => ({
   ...context,
-  tools: requiredZenTools(context.tools),
-  messages: context.messages.map(message => message.role !== 'assistant' ? message : {
-    ...message,
-    content: message.content.map(block =>
-      block.type === 'thinking' && block.thinking.trim().length > 0 && block.thinkingSignature === undefined
-        ? { ...block, thinkingSignature: 'reasoning_content' }
-        : block),
+  messages: context.messages.map((message, index) => {
+    // Pad the tool list where pi-ai keeps it: the leading system message.
+    if (index === 0 && message.role === 'system') {
+      return { ...message, toolsAdded: requiredZenTools(message.toolsAdded ?? context.tools ?? []) }
+    }
+    if (message.role !== 'assistant') return message
+    return {
+      ...message,
+      content: message.content.map(block =>
+        block.type === 'thinking' && block.thinking.trim().length > 0 && block.thinkingSignature === undefined
+          ? { ...block, thinkingSignature: 'reasoning_content' }
+          : block),
+    }
   }),
 })
 
@@ -216,15 +227,15 @@ type ZenApi = 'openai-completions' | 'openai-responses'
 
 const zenStreamFor = (api: ZenApi): ProviderStreams => api === 'openai-responses'
   ? {
-    stream: (model: Model<'openai-responses'>, context: PiContext, options: SimpleStreamOptions) =>
+    stream: (model: Model<'openai-responses'>, context: TranscriptContext, options: SimpleStreamOptions) =>
       sanitizeStream(piResponsesStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
-    streamSimple: (model: Model<'openai-responses'>, context: PiContext, options: SimpleStreamOptions) =>
+    streamSimple: (model: Model<'openai-responses'>, context: TranscriptContext, options: SimpleStreamOptions) =>
       sanitizeStream(piResponsesStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
   } as unknown as ProviderStreams
   : {
-    stream: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
+    stream: (model: Model<'openai-completions'>, context: TranscriptContext, options: SimpleStreamOptions) =>
       sanitizeStream(piAgentStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
-    streamSimple: (model: Model<'openai-completions'>, context: PiContext, options: SimpleStreamOptions) =>
+    streamSimple: (model: Model<'openai-completions'>, context: TranscriptContext, options: SimpleStreamOptions) =>
       sanitizeStream(piAgentStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
   }
 
