@@ -331,9 +331,18 @@ function buildModels(
       // Models not yet in the pi-ai built-in catalogue still need the Zen-
       // specific maxTokensField ("max_tokens") so the proxy does not reject
       // the request with a 500 when "max_completion_tokens" arrives.
+      //
+      // `supportsStrictMode` is what makes pi-ai state `strict: false` on a
+      // Responses tool. Without that field the Responses API normalises the
+      // schema into strict mode, where every declared property counts as
+      // required and the model has to invent the optional arguments. Zen's own
+      // CLI writes the field on every OpenAI-wire tool for the same reason.
+      // Chat-completions models need nothing: pi-ai omits `strict` there, and
+      // that API stays non-strict by default.
+      const strictCompat = api === 'openai-responses' ? { supportsStrictMode: true as const } : {}
       const compat = baseCompat === undefined
-        ? { maxTokensField: 'max_tokens' as const, supportsReasoningEffort: false as const }
-        : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false }
+        ? { maxTokensField: 'max_tokens' as const, supportsReasoningEffort: false as const, ...strictCompat }
+        : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false, ...strictCompat }
 
       // No ladder upstream ⇒ no selector: `reasoning: false` means "no effort
       // control", never "no thinking".
