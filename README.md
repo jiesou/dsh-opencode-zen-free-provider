@@ -50,7 +50,25 @@ OpenCode Zen 把非凭证类拒绝（免费额度到期、区域限制等）以 
   config:
     retryPolicy:
       mode: always
+    maxRequestImageBytes: 2097152
+    requestImageMaxBytes: 1048576
 ```
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `retryPolicy` | `object` | 省略即用普通默认 | 模型请求重试策略 |
+| `maxRequestImageBytes` | `number` | `2097152`（2 MiB） | 单次请求允许内联的 base64 图片字节上限 |
+| `requestImageMaxBytes` | `number` | `1048576`（1 MiB） | 单张图片重编码后的字节上限 |
+
+## 图片预算
+
+Zen 这条 wire 是无状态的：每轮请求都要把历史重新发一遍，留在上下文里的图片因此每轮都会再传一次。
+
+- 每张图片先归一化（2048×2048 像素总预算），再重编码到 `requestImageMaxBytes`（默认 1 MiB）以内。
+- 一轮请求内联的 base64 图片总量超过 `maxRequestImageBytes`（默认 2 MiB）时，不发请求，而是抛出 `IMAGE_OFFLOAD_REQUIRED` 并报出需要 offload 的张数。DSH 据此把**最旧**的图片记入 `image/offload` 事件并重试；之后每轮用占位文本代替这些图片的字节，模型仍能从占位文本里读到图片身份和可读路径。
+- 已经 offload 的图片不再读取字节、不再编码、不再上传。
+
+两个值都是 base64 口径（约等于原图字节 ×4/3）。默认组合约等于"一张整尺寸图 + 一张半尺寸图"。想让模型一次看更多图就调大，想省流量就调小；但 `maxRequestImageBytes` 必须大于单张的 base64 长度（1 MiB 图约 1.4 MB），否则一张图也放不下。
 
 ## License
 
