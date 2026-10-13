@@ -27,17 +27,6 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
  * the field is one the settings service shows a form for.
  */
 type LiveConfig = Schemastery.TypeT<typeof Config>;
-/**
- * Zen's free tier is gated on the request fingerprint, and one of the checks is
- * the tool list: it must offer at least two distinct tools, `bash` among them,
- * alongside `stream: true` (both transports hardcode that). Requests that carry
- * fewer tools — compaction, session titles, summaries, or any turn whose
- * permissions cut the list down — are refused with FreeTierError and the
- * misleading "free tier can only be used from within OpenCode". Pad such
- * requests so the shape requirement holds. Declared tools stay first and only
- * missing ones are appended, so a request that already qualifies is untouched
- * and the provider's prompt cache is not invalidated.
- */
 export declare const requiredZenTools: (tools?: readonly Tool[]) => Tool[];
 export declare function apply(ctx: Context, config: LiveConfig): Promise<void>;
 export {};

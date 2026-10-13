@@ -12,7 +12,7 @@ OpenCode Zen Free provider for dsh.
 
 > 更新：现在没有 DeepSeek V4 Flash 了 😭
 
-现在 MiMo V2.5 后端额外支持到 1M 上下文。
+上下文窗口默认以 models.dev 的元数据为准。**MiMo V2.6 Flash 例外**：它的后端服务 1M，但 models.dev 只登记了 200K 那一档，本插件按 1M 声明。
 
 ## 安装
 

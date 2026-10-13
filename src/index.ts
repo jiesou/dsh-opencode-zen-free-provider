@@ -7,7 +7,6 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 // Augments Context with `fiber.entry` and the `loader/volatile-update` event.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import z from '@deepseek-ai/schemastery'
-import { createHash } from 'node:crypto'
 import { createProvider, type AuthContext, type CredentialStore, type Model, type SimpleStreamOptions, type SystemMessage, type ThinkingLevelMap, type ProviderStreams, type Tool, type TranscriptContext } from '@earendil-works/pi-ai'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { stream as piAgentStream, streamSimple as piAgentStreamSimple } from '@earendil-works/pi-ai/api/openai-completions'
@@ -18,9 +17,15 @@ export const inject = ['llm']
 
 const PROVIDER = name
 const DISPLAY_NAME = 'OpenCode Zen Free'
-/** Latest CLI version, read off unpkg's `@latest` redirect via the package's own `package.json`. */
+/**
+ * Latest CLI version, read off unpkg's `@latest` redirect via the package's own `package.json`.
+ *
+ * The fallback matters: Zen refuses anything below 1.18.0 outright with HTTP 426
+ * "OpenCode 1.18.0 or newer is required to use the free tier", so an unreachable
+ * unpkg must not silently drop us below that floor.
+ */
 const OPENCODE_VERSION_URL = 'https://unpkg.com/opencode-ai@latest/package.json'
-const OPENCODE_VERSION_FALLBACK = '1.18.18'
+const OPENCODE_VERSION_FALLBACK = '1.19.0'
 
 /** Envelope types that must stay AUTH-classified instead of being rewritten. */
 const AUTH_ERROR_TYPES = new Set(['AuthError', 'authentication_error', 'invalid_api_key', 'unauthorized'])
@@ -83,38 +88,78 @@ const resolveOpenCodeVersion = async (): Promise<string> => {
   }
 }
 
-const opencodeId = (prefix: 'ses' | 'msg', value: string): string => {
-  const digest = createHash('sha256').update(`dsh-opencode-${prefix}\0${value}`).digest()
-  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-  let number = BigInt(`0x${digest.toString('hex')}`)
-  let encoded = ''
-  while (number > 0) {
-    encoded = alphabet[Number(number % 62n)] + encoded
-    number /= 62n
+/**
+ * Identifier format of the opencode CLI (`packages/schema/src/identifier.ts`):
+ * the 12 leading hex digits are the six most significant bytes of a 64-bit
+ * value (`ms * 0x1000 + counter`, bit-inverted for `ses_` so the newest sorts
+ * first), followed by 14 random base62 characters.
+ *
+ * Zen's free tier decodes that timestamp prefix, so a digest-shaped prefix gets
+ * `FreeTierError` even with every header correct. `msg_` is not validated, but
+ * minting both the same way keeps the wire honest.
+ */
+const ID_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+let lastIdTimestamp = 0
+let idCounter = 0
+
+const opencodeId = (prefix: 'ses' | 'msg', descending: boolean): string => {
+  const timestamp = Date.now()
+  if (timestamp !== lastIdTimestamp) {
+    lastIdTimestamp = timestamp
+    idCounter = 0
   }
-  while (encoded.length < 14) encoded = `0${encoded}`
-  return `${prefix}_${digest.toString('hex').slice(0, 12)}${encoded.slice(0, 14)}`
+  idCounter += 1
+  let value = BigInt(timestamp) * 0x1000n + BigInt(idCounter)
+  if (descending) value = ~value
+  // Byte by byte from the top, as upstream does: `ses_` inverts the value, and
+  // a single arithmetic shift of a negative BigInt is floored, not truncated.
+  let time = ''
+  for (let index = 0; index < 6; index += 1) {
+    time += Number((value >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, '0')
+  }
+  let random = ''
+  for (let index = 0; index < 14; index += 1) {
+    random += ID_ALPHABET[Math.floor(Math.random() * 62)]
+  }
+  return `${prefix}_${time}${random}`
 }
 
-const lastUserContent = (context: TranscriptContext): string => {
-  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
-    const message = context.messages[index]
-    if (message.role !== 'user') continue
-    if (typeof message.content === 'string') return message.content
-    return message.content.map(part => part.type === 'text' ? part.text : part.data).join('\0')
+/**
+ * Session ids already minted for a conversation. Zen meters free usage per
+ * session and routes its prompt cache by the id, so every turn of one
+ * conversation has to reuse the id minted its first turn.
+ */
+const ZEN_SESSION_KEEP = 128
+const zenSessions = new Map<string, string>()
+
+const zenSessionId = (seed: string): string => {
+  const hit = zenSessions.get(seed)
+  if (hit !== undefined) return hit
+  const minted = opencodeId('ses', true)
+  if (zenSessions.size >= ZEN_SESSION_KEEP) {
+    const oldest = zenSessions.keys().next()
+    if (!oldest.done) zenSessions.delete(oldest.value)
   }
-  return ''
+  zenSessions.set(seed, minted)
+  return minted
 }
 
-const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, context: TranscriptContext, options: SimpleStreamOptions) => {
+const zenApiHeaders = (model: Pick<Model<ZenApi>, 'headers'>, options: SimpleStreamOptions) => {
   const sessionId = options.sessionId ?? 'dsh-session-unknown'
-  const requestSeed = `${sessionId}\0${lastUserContent(context)}`
+  // One id per conversation, reused by every turn: Zen meters free usage by
+  // session and caches by it.
+  const session = zenSessionId(sessionId)
   return {
     ...model.headers,
     'HTTP-Referer': 'https://opencode.ai',
     'x-opencode-project': 'global',
-    'x-opencode-session': opencodeId('ses', sessionId),
-    'x-opencode-request': opencodeId('msg', requestSeed),
+    'x-opencode-session': session,
+    'x-opencode-session-id': session,
+    'x-session-affinity': session,
+    'X-Session-Id': session,
+    // The turn, not the conversation: no validation, but a fresh id keeps the
+    // shape of what opencode sends.
+    'x-opencode-request': opencodeId('msg', false),
     'x-opencode-client': 'cli',
   }
 }
@@ -151,21 +196,24 @@ const zenTool = (name: string): Tool => ({
 })
 
 /**
- * Zen's free tier is gated on the request fingerprint, and one of the checks is
- * the tool list: it must offer at least two distinct tools, `bash` among them,
- * alongside `stream: true` (both transports hardcode that). Requests that carry
- * fewer tools — compaction, session titles, summaries, or any turn whose
- * permissions cut the list down — are refused with FreeTierError and the
- * misleading "free tier can only be used from within OpenCode". Pad such
- * requests so the shape requirement holds. Declared tools stay first and only
- * missing ones are appended, so a request that already qualifies is untouched
- * and the provider's prompt cache is not invalidated.
+ * Zen's free tier is gated on the request fingerprint, and the checks are the
+ * tool names: the list must offer `bash` and `read` (lowercase, by name alone —
+ * the schemas are never inspected), alongside `stream: true` (both transports
+ * hardcode that). Requests carrying fewer tools — compaction, session titles,
+ * summaries, or any turn whose permissions cut the list down — are refused with
+ * FreeTierError and the misleading "free tier can only be used from within
+ * OpenCode". Pad such requests so the shape requirement holds. Declared tools
+ * stay first and only missing ones are appended, so a request that already
+ * qualifies is untouched and the provider's prompt cache is not invalidated.
  */
+const ZEN_REQUIRED_TOOLS = ['bash', 'read'] as const
+
 export const requiredZenTools = (tools: readonly Tool[] = []): Tool[] => {
-  const present = new Set(tools.map(tool => tool.name))
   const filled = [...tools]
-  if (!present.has('bash')) filled.push(zenTool('bash'))
-  if (new Set(filled.map(tool => tool.name)).size < 2) filled.push(zenTool('zen-tool'))
+  const present = new Set(filled.map(tool => tool.name))
+  for (const name of ZEN_REQUIRED_TOOLS) {
+    if (!present.has(name)) filled.push(zenTool(name))
+  }
   return filled
 }
 
@@ -248,15 +296,15 @@ type ZenApi = 'openai-completions' | 'openai-responses'
 const zenStreamFor = (api: ZenApi): ProviderStreams => api === 'openai-responses'
   ? {
     stream: (model: Model<'openai-responses'>, context: TranscriptContext, options: SimpleStreamOptions) =>
-      sanitizeStream(piResponsesStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
+      sanitizeStream(piResponsesStream({ ...model, headers: zenApiHeaders(model, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
     streamSimple: (model: Model<'openai-responses'>, context: TranscriptContext, options: SimpleStreamOptions) =>
-      sanitizeStream(piResponsesStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
+      sanitizeStream(piResponsesStreamSimple({ ...model, headers: zenApiHeaders(model, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
   } as unknown as ProviderStreams
   : {
     stream: (model: Model<'openai-completions'>, context: TranscriptContext, options: SimpleStreamOptions) =>
-      sanitizeStream(piAgentStream({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
+      sanitizeStream(piAgentStream({ ...model, headers: zenApiHeaders(model, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
     streamSimple: (model: Model<'openai-completions'>, context: TranscriptContext, options: SimpleStreamOptions) =>
-      sanitizeStream(piAgentStreamSimple({ ...model, headers: zenApiHeaders(model, context, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
+      sanitizeStream(piAgentStreamSimple({ ...model, headers: zenApiHeaders(model, options) }, normalizeReasoningContext(context), { ...options, fetch: zenFetch })),
   }
 
 const zenApi: Partial<Record<ZenApi, ProviderStreams>> = {
@@ -364,7 +412,10 @@ function buildModels(
         ...(controllable ? { thinkingLevelMap: reasoningMapFor(levels, api) } : {}),
         input: input.length > 0 ? input : ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: id === 'mimo-v2.5-free' ? 1_048_576
+        // MiMo's backend serves 1M; models.dev only declares the 200K tier. The
+        // cap is client-side metadata, so declaring 1M here is what unlocks it —
+        // verified against the live endpoint at 320K prompt tokens (HTTP 200).
+        contextWindow: id === 'mimo-v2.6-flash-free' ? 1_048_576
           : typeof limit?.context === 'number' ? limit.context : 1_048_576,
         maxTokens: typeof limit?.output === 'number' ? limit.output : 32_768,
         ...(compat ? { compat } : {}),
