@@ -21,6 +21,13 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      # Without the install, tsc cannot see `@types/node` and fails with TS2688,
+      # so the build step never regenerates lib/ and the committed one ships
+      # instead. That only looked harmless because lib/ is committed and was
+      # current; a src/ change without a local build would go out stale.
+      # `npm install`, not `npm ci`: the lockfile is gitignored on purpose.
+      - run: npm install --no-audit --no-fund
+
       - name: Typecheck, build and publish
         shell: bash
         run: |
