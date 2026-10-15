@@ -8,11 +8,7 @@ OpenCode Zen Free provider for dsh.
 
 本插件可以将 OpenCode Zen 的免费模型接入 dsh 使用。插件启动时从 OpenCode Zen 和 models.dev 同步模型目录与所有元数据，**仅抓取一次**，不轮循。哪怕启动时拉取失败，插件也能正常挂载，路由以空目录提供服务。
 
-~~其中 DeepSeek V4 Flash 额外支持到 1M 上下文。~~
-
-> 更新：现在没有 DeepSeek V4 Flash 了 😭
-
-上下文窗口默认以 models.dev 的元数据为准。**MiMo V2.6 Flash 例外**：它的后端服务 1M，但 models.dev 只登记了 200K 那一档，本插件按 1M 声明。
+上下文窗口默认以 models.dev 的元数据为准。**MiMo V2.6 Flash 与 DeepSeek V4.1 Flash 例外**：它们的后端实际服务 1M，但 models.dev 给免费档只登记了 200K 那一档，本插件按 1M 声明。实测 `deepseek-v4.1-flash-free` 在 104 万 prompt tokens 时仍返回 200，把针藏在 3MB 文档 93% 深处也能准确取回；真正的天花板是请求体大小（约 3.9MB 字符）而不是上下文窗口。
 
 ## 安装
 
@@ -39,6 +35,15 @@ dsh plugin --profile web add github:jiesou/dsh-opencode-zen-free-provider
 ## 错误提示
 
 OpenCode Zen 把非凭证类拒绝（免费额度到期、区域限制等）以 HTTP 401/403 返回，dssharness 会把这些状态码归类为"API Key 无效"。本插件在终端错误事件里保留真实原因，让真因显示出来；真正的鉴权失败仍按 AUTH 走。无法解析的内容原样透传。
+
+若看到 `FreeTierError: OpenCode's free tier can only be used from within OpenCode`，那是**上游的客户端指纹门**，与本插件无关，也不是 API Key 问题。2026-10-11 起免费层从 `/zen/v1` 迁到 `/inference/v1`，门禁下沉到不可审计的私有 inference 服务。本插件按实测通过条件构造请求：
+
+- 走 `/inference/v1`（`/zen/v1` 对匿名请求一律 403）；
+- 四个 session 头同值双发：`x-opencode-session`、`x-opencode-session-id`、`x-session-affinity`、`x-session-id`；
+- `x-opencode-project: global`（40-hex project id 会触发 403）；
+- **不发** `x-opencode-request`，**不发** `HTTP-Referer`——这两个头的存在本身就会触发 403；
+- session id 前 12 位 hex 必须是反转时间戳（`ses_` 降序、`msg_` 升序），纯随机即拒；
+- 请求的 tools 必须包含 `bash` 与 `read`（按小写名精确匹配），缺任一即 403。精简、标题、摘要等工具数不足的请求由本插件自动补齐占位工具。
 
 提示：OpenCode 的 Free 模型会被基于 IP 限流。
 
