@@ -8,7 +8,7 @@ OpenCode Zen Free provider for dsh.
 
 本插件可以将 OpenCode Zen 的免费模型接入 dsh 使用。插件启动时从 OpenCode Zen 和 models.dev 同步模型目录与所有元数据，**仅抓取一次**，不轮循。哪怕启动时拉取失败，插件也能正常挂载，路由以空目录提供服务。
 
-上下文窗口默认以 models.dev 的元数据为准。**MiMo V2.6 Flash 与 DeepSeek V4.1 Flash 例外**：它们的后端实际服务 1M，但 models.dev 给免费档只登记了 200K 那一档，本插件按 1M 声明。实测 `deepseek-v4.1-flash-free` 在 104 万 prompt tokens 时仍返回 200，把针藏在 3MB 文档 93% 深处也能准确取回；真正的天花板是请求体大小（约 3.9MB 字符）而不是上下文窗口。
+上下文窗口默认以 models.dev 的元数据为准。**MiMo V2.6 Flash、DeepSeek V4.1 Flash 与 GLM 5.3 Flash 例外**：它们的后端实际服务比免费档登记的 200K 更宽，本插件按实测值声明（前两者 1M，GLM 5.3 Flash 600K）。实测 `deepseek-v4.1-flash-free` 在 104 万 prompt tokens 时仍返回 200，把针藏在 3MB 文档 93% 深处也能准确取回；真正的天花板是请求体大小（约 3.9MB 字符）而不是上下文窗口。`glm-5.3-flash-free`（上游路由到 `perplexity/glm-5.3-flash`）在 26.4 万 prompt tokens 时同样取回藏在 93% 深处的标记，61.7 万 tokens 仍返回 200，65.9 万 tokens 起被上游 `context_length_exceeded` 拒绝，所以按 60 万声明而不是付费档的 1M。
 
 ## 安装
 

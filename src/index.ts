@@ -38,13 +38,19 @@ const ZEN_CATALOG_URL = `${ZEN_BASE_URL}/models`
  * Context windows wider than the ones models.dev declares for the free tier.
  *
  * models.dev registers the free rows at the conservative 200K tier while the
- * backend serves 1M, and the window is client-side metadata — the declared
+ * backend serves more, and the window is client-side metadata — the declared
  * number is what the harness trims history against, so trusting the feed
  * throttles a model that would serve more.
+ *
+ * GLM 5.3 Flash is measured rather than inherited from its paid row: the free
+ * id routes to `perplexity/glm-5.3-flash`, which refuses anything past ~640K
+ * prompt tokens, so it declares 600K — inside the largest value the live
+ * endpoint has served (616,702) — instead of the paid row's 1M.
  */
 const CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
   'mimo-v2.6-flash-free': 1_048_576,
   'deepseek-v4.1-flash-free': 1_048_576,
+  'glm-5.3-flash-free': 614_400,
 }
 
 /**
@@ -497,8 +503,8 @@ function buildModels(
         ...(controllable ? { thinkingLevelMap: reasoningMapFor(levels, api) } : {}),
         input: input.length > 0 ? input : ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // The feed declares the 200K tier for both of these while the backend
-        // serves 1M, and the cap is client-side metadata: the declared value is
+        // The feed declares the 200K tier for these while the backend serves
+        // more, and the cap is client-side metadata: the declared value is
         // what the harness trims against, so mirroring the feed throttles a
         // model that would otherwise serve more. models.dev lists the *paid*
         // `deepseek-v4.1-flash` at 1M (`deepseek-v4-flash` likewise at 1M), and
