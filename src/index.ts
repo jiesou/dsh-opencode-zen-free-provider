@@ -285,23 +285,39 @@ export const requiredZenTools = (tools: readonly Tool[] = []): Tool[] => {
 // the transcript's system messages, so padding the list means rewriting the
 // leading `toolsAdded` (falling back to `context.tools`, which a context built
 // before normalization still carries).
-const normalizeReasoningContext = (context: TranscriptContext & { tools?: readonly Tool[] }): TranscriptContext => ({
-  ...context,
-  messages: context.messages.map((message, index) => {
-    // Pad the tool list where pi-ai keeps it: the leading system message.
-    if (index === 0 && message.role === 'system') {
-      return { ...message, toolsAdded: requiredZenTools(message.toolsAdded ?? context.tools ?? []) }
-    }
-    if (message.role !== 'assistant') return message
-    return {
-      ...message,
-      content: message.content.map(block =>
-        block.type === 'thinking' && block.thinking.trim().length > 0 && block.thinkingSignature === undefined
-          ? { ...block, thinkingSignature: 'reasoning_content' }
-          : block),
-    }
-  }),
-})
+const normalizeReasoningContext = (context: TranscriptContext & { tools?: readonly Tool[] }): TranscriptContext => {
+  const hasLeadingSystem = context.messages[0]?.role === 'system'
+  const baseMessages = hasLeadingSystem
+    ? context.messages.map((message, index) => {
+        if (index === 0 && message.role === 'system') {
+          return { ...message, toolsAdded: requiredZenTools(message.toolsAdded ?? context.tools ?? []) }
+        }
+        return message
+      })
+    : [
+        {
+          role: 'system' as const,
+          content: '',
+          toolsAdded: requiredZenTools(context.tools ?? []),
+          timestamp: Date.now(),
+        },
+        ...context.messages,
+      ]
+
+  return {
+    ...context,
+    messages: baseMessages.map((message) => {
+      if (message.role !== 'assistant') return message
+      return {
+        ...message,
+        content: message.content.map(block =>
+          block.type === 'thinking' && block.thinking.trim().length > 0 && block.thinkingSignature === undefined
+            ? { ...block, thinkingSignature: 'reasoning_content' }
+            : block),
+      }
+    }),
+  }
+}
 
 // Zen reports non-credential refusals (ended free promotions, region blocks) as
 // HTTP 401/403, which the harness classifies as AUTH and masks as "API key is
@@ -591,7 +607,7 @@ export async function apply(ctx: Context, config: LiveConfig): Promise<void> {
       requestImagePixelBudget: 4_194_304,
       requestImageMaxBytes: opts.requestImageMaxBytes ?? DEFAULT_REQUEST_IMAGE_MAX_BYTES,
       retryPolicy: resolveRetryPolicy(opts.retryPolicy, `${name}: retryPolicy`),
-      piProvider,
+      piProvider: piProvider as any,
       modelErrors: new Map(),
       configuredMaxTokens: new Map(),
     }]])
