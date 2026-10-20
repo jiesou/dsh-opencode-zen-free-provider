@@ -443,24 +443,27 @@ function reasoningLevelsFor(metadata: Record<string, unknown>): string[] {
 // `Default` (the harness's "no selection" path) is the *absent key* — leaving
 // `reasoning_effort` off the wire and letting the upstream choose. Each ladder
 // level the endpoint accepts lands at its own key with its own wire value; the
-// `off` key carries the upstream's literal close value when the feed names one
-// (e.g. `none`), so the selector's "Off" entry is a real switch rather than a
-// `no-op. Responses-model feeds name no close value and `/responses` rejects
-// both fabricated ones (`'off'` is an unknown variant, `'none'` unsupported
-// for this model). pi-ai sends nothing only when the key is explicitly `null`
-// (an absent key falls back to sending `'none'`), so `off: null` is the honest
-// "upstream decides" — it also drops "Off" from the selector, which is correct
-// because this endpoint offers no way to turn thinking down.
+// `off` key carries the upstream's literal close value only when the feed names
+// one (e.g. `none`), so the selector's "Off" entry is a real switch rather than
+// a no-op. A feed that names no close value gets `null`: nothing goes on the
+// wire and the "Off" entry drops out of the selector, which is the honest
+// reading — this endpoint offers no way to turn thinking down, so both the
+// default and the off path have to leave the parameter alone.
+//
+// Never fabricate a close value. Every chat/completions backend behind this
+// route rejects `'off'` as an unknown variant and fails the whole turn, while
+// pi-ai sends a fabricated `off` on the *default* path too — so one such value
+// broke every turn on a model with no `none` in its ladder (#4). No upstream
+// OpenCode protocol spells a close that way either: `packages/core/src/
+// variant.ts` derives close variants from the feed and translates `none` into
+// protocol-specific flags (`thinking: {type: "disabled"}`, `enable_thinking:
+// false`), never into an invented effort value.
 function reasoningMapFor(levels: readonly string[], api: ZenApi): ThinkingLevelMap {
   const map: ThinkingLevelMap = {}
   for (const key of PI_LEVEL_KEYS) {
     if (levels.includes(key)) map[key] = key
   }
-  if (api === 'openai-completions') {
-    map.off = levels.includes('none') ? 'none' : 'off'
-  } else {
-    map.off = null
-  }
+  map.off = api === 'openai-completions' && levels.includes('none') ? 'none' : null
   return map
 }
 
