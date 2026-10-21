@@ -34,24 +34,17 @@ jobs:
           set -euo pipefail
           npm run typecheck --if-present && npm run build --if-present
           version="$(node -p "require('./package.json').version")"
-          # A publish that exits 0 is not proof the version is live: when the
-          # registry holds it back for proof-of-presence it still stores the
-          # tarball (and its provenance attestation) and answers 200, so the CLI
-          # prints "+ name@version" and reports success. 0.1.28 sat that way,
-          # announced as published. Ask the registry instead of the CLI.
-          visible() {
-            npm view "@jiesou/dsh-opencode-zen-free-provider@${version}" version >/dev/null 2>&1
-          }
           if output="$(npm publish --provenance --access public 2>&1)"; then
             echo "$output"
-            for attempt in 1 2 3 4; do
-              visible && break
-              sleep 5
-            done
-            if visible; then
-              echo "published ${version}"
+            # npm 11 stages the upload instead of publishing it when the account
+            # requires proof-of-presence and the run authenticates with a
+            # trusted publisher: the command exits 0 while the registry stays
+            # untouched until the owner approves the staged version. Reporting
+            # that as "published" hid a release for a day (0.1.28).
+            if grep -q 'has been staged' <<<"$output"; then
+              echo "::warning::@jiesou/dsh-opencode-zen-free-provider@${version} was staged, not published — approve it with \`npm stage approve <stage-id>\`"
             else
-              echo "::warning::@jiesou/dsh-opencode-zen-free-provider@${version} was accepted but is not on the registry — it is staged pending 2FA approval. Run \`npm stage list\` and \`npm stage approve <stage-id>\`."
+              echo "published"
             fi
           elif grep -Eq 'EPUBLISHCONFLICT|previously published versions|previously staged version' <<<"$output"; then
             echo "skip: version ${version} is already published or staged"
