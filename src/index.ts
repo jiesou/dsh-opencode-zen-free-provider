@@ -217,6 +217,48 @@ let zenUserAgent: string | undefined
 
 const ZEN_URL_MARKERS = ['opencode.ai/inference', 'opencode.ai/zen']
 
+/**
+ * A replayed assistant message carries the model's reasoning field even when
+ * that turn produced no reasoning — the shape opencode's own client sends.
+ *
+ * `lowerAssistantMessage` (opencode `packages/ai/src/protocols/openai-chat.ts`)
+ * picks the field name from the model's declared reasoning field and writes `""`
+ * for an assistant turn with no reasoning part whenever the model requires one;
+ * `requireReasoning` follows a declared field, so every free id qualifies —
+ * models.dev declares `interleaved.field` for all of them. Zen's backend that
+ * validates this refuses the divergent shape with "The reasoning_content in the
+ * thinking mode must be passed back to the API".
+ *
+ * pi-ai pads the same way through `compat.requiresReasoningContentOnAssistantMessages`
+ * (declared on every model below), but that path is gated on `model.reasoning`,
+ * and a model with no declared effort ladder is `reasoning: false` here — no
+ * picker, which is not the same as no thinking. Those ids still replay real
+ * reasoning out of their thinking blocks, so their missing fields are filled
+ * here instead.
+ */
+export const withReplayedReasoning = (body: string, modelIds: ReadonlySet<string>): string => {
+  let payload: unknown
+  try {
+    payload = JSON.parse(body)
+  } catch {
+    return body
+  }
+  if (!isRecord(payload) || typeof payload.model !== 'string' || !modelIds.has(payload.model)) return body
+  if (!Array.isArray(payload.messages)) return body
+  let changed = false
+  for (const message of payload.messages) {
+    if (!isRecord(message) || message.role !== 'assistant') continue
+    if (typeof message.reasoning_content !== 'string') {
+      message.reasoning_content = ''
+      changed = true
+    }
+  }
+  return changed ? JSON.stringify(payload) : body
+}
+
+/** Models whose reasoning replay pi-ai's own padding cannot reach; see above. */
+const zenReasoningBackfill = new Set<string>()
+
 const zenFetch: typeof globalThis.fetch = (input, init) => {
   const url = typeof input === 'string'
     ? input
@@ -226,7 +268,9 @@ const zenFetch: typeof globalThis.fetch = (input, init) => {
   }
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
   headers.set('user-agent', zenUserAgent)
-  return zenNativeFetch(input, { ...init, headers })
+  const nextInit = { ...init, headers }
+  if (typeof nextInit.body === 'string') nextInit.body = withReplayedReasoning(nextInit.body, zenReasoningBackfill)
+  return zenNativeFetch(input, nextInit)
 }
 
 /**
@@ -498,14 +542,20 @@ function buildModels(
       // Chat-completions models need nothing: pi-ai omits `strict` there, and
       // that API stays non-strict by default.
       const strictCompat = api === 'openai-responses' ? { supportsStrictMode: true as const } : {}
+      // opencode's own client writes `reasoning_content` on every replayed
+      // assistant message — empty when the turn produced none — for every model
+      // whose feed declares a reasoning field, which is all of these. pi-ai's
+      // flag reproduces that, but only for models it sees as reasoning ones, so
+      // the ladder-less ids fall through to `withReplayedReasoning`.
       const compat = baseCompat === undefined
-        ? { maxTokensField: 'max_tokens' as const, supportsReasoningEffort: false as const, ...strictCompat }
-        : { ...baseCompat, requiresReasoningContentOnAssistantMessages: false, ...strictCompat }
+        ? { maxTokensField: 'max_tokens' as const, supportsReasoningEffort: false as const, ...strictCompat, requiresReasoningContentOnAssistantMessages: true as const }
+        : { ...baseCompat, requiresReasoningContentOnAssistantMessages: true as const, ...strictCompat }
 
       // No ladder upstream ⇒ no selector: `reasoning: false` means "no effort
       // control", never "no thinking".
       const levels = reasoningLevelsFor(metadata)
       const controllable = levels.length > 0
+      if (!controllable) zenReasoningBackfill.add(id)
 
       const limit = isRecord(metadata.limit) ? metadata.limit : undefined
       const input = isRecord(metadata.modalities) && Array.isArray(metadata.modalities.input)
