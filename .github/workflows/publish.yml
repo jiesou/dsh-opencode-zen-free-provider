@@ -33,10 +33,21 @@ jobs:
         run: |
           set -euo pipefail
           npm run typecheck --if-present && npm run build --if-present
+          version="$(node -p "require('./package.json').version")"
           if output="$(npm publish --provenance --access public 2>&1)"; then
-            echo "published"
+            echo "$output"
+            # npm 11 stages the upload instead of publishing it when the account
+            # requires proof-of-presence and the run authenticates with a
+            # trusted publisher: the command exits 0 while the registry stays
+            # untouched until the owner approves the staged version. Reporting
+            # that as "published" hid a release for a day (0.1.28).
+            if grep -q 'has been staged' <<<"$output"; then
+              echo "::warning::@jiesou/dsh-opencode-zen-free-provider@${version} was staged, not published — approve it with \`npm stage approve <stage-id>\`"
+            else
+              echo "published"
+            fi
           elif grep -Eq 'EPUBLISHCONFLICT|previously published versions|previously staged version' <<<"$output"; then
-            echo "skip: version already exists"
+            echo "skip: version ${version} is already published or staged"
           else
             echo "publish failed:"
             echo "$output"
